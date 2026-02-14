@@ -130,8 +130,8 @@ set outlookLink to ""
 if internetMessageId is not "" then
 	set cleanMessageId to my trimText(internetMessageId)	
 	if cleanMessageId is not "" then
-		if cleanMessageId does not start with "<" then set cleanMessageId to "<" & cleanMessageId
-		if cleanMessageId does not end with ">" then set cleanMessageId to cleanMessageId & ">"
+		if not (cleanMessageId starts with "<") then set cleanMessageId to "<" & cleanMessageId
+		if not (cleanMessageId ends with ">") then set cleanMessageId to cleanMessageId & ">"
 		set encodedMessageId to my encodeMessageIdForURL(cleanMessageId)
 		set outlookLink to "message://" & encodedMessageId
 	end if
