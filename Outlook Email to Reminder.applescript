@@ -28,21 +28,41 @@ end if
 -- ============================================================================
 -- Section 2: Get the currently selected email in Outlook
 -- ============================================================================
--- Outlook's AppleScript dictionary exposes "current messages" at the
--- application level, which returns a list of messages the user has
--- highlighted in the message list. We grab the first item from that list.
--- If nothing is selected (empty list) we notify the user and bail out.
+-- When invoked via Keyboard Maestro the app switch can race the
+-- AppleScript engine, so we give Outlook a moment to settle.
+-- We then try two methods to obtain the selected message:
+--   1. "selection" – returns whatever is highlighted in the UI
+--   2. "current messages" – an older/alternative property
+-- If neither yields a message we notify the user and bail out.
 -- ============================================================================
 try
 	tell application "Microsoft Outlook"
-		set selectedMessages to current messages
+		-- Small delay so Outlook registers the selection after an app switch
+		delay 0.3
 
-		if selectedMessages is {} then
+		-- Method 1: "selection" returns a list of selected objects
+		set theMessage to missing value
+		try
+			set sel to selection
+			if sel is not {} then
+				set theMessage to item 1 of sel
+			end if
+		end try
+
+		-- Method 2: fall back to "current messages"
+		if theMessage is missing value then
+			try
+				set msgs to current messages
+				if msgs is not {} then
+					set theMessage to item 1 of msgs
+				end if
+			end try
+		end if
+
+		if theMessage is missing value then
 			display notification "No email is selected in Outlook." with title "Reminder Not Created" sound name "Basso"
 			return
 		end if
-
-		set theMessage to item 1 of selectedMessages
 
 		-- ====================================================================
 		-- Section 3: Extract email properties
@@ -53,7 +73,11 @@ try
 		-- ====================================================================
 		set theSubject to subject of theMessage
 		set theMessageId to id of theMessage
-		set theSender to (name of sender of theMessage)
+		try
+			set theSender to (name of sender of theMessage)
+		on error
+			set theSender to "Unknown"
+		end try
 	end tell
 
 on error errMsg
