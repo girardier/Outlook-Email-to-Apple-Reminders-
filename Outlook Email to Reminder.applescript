@@ -28,14 +28,14 @@ end if
 -- ============================================================================
 -- Section 2: Get the currently selected email in Outlook
 -- ============================================================================
--- Outlook's AppleScript dictionary exposes "selected objects" on the
--- front window, which returns a list of whatever the user has highlighted
--- in the message list. We grab the first item from that list.
+-- Outlook's AppleScript dictionary exposes "current messages" at the
+-- application level, which returns a list of messages the user has
+-- highlighted in the message list. We grab the first item from that list.
 -- If nothing is selected (empty list) we notify the user and bail out.
 -- ============================================================================
 try
 	tell application "Microsoft Outlook"
-		set selectedMessages to selected objects of front window
+		set selectedMessages to current messages
 
 		if selectedMessages is {} then
 			display notification "No email is selected in Outlook." with title "Reminder Not Created" sound name "Basso"
