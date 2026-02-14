@@ -3,7 +3,7 @@
 -- ============================================================================
 -- Creates an Apple Reminder from the currently selected Microsoft Outlook email.
 -- The reminder title is set to the email subject, and the notes field contains
--- a clickable deep link (message://) back to the original email in Outlook.
+-- a deep link back to the original email in Outlook.
 --
 -- Designed for use with Keyboard Maestro but can also be run standalone
 -- from Script Editor or via osascript.
@@ -11,10 +11,6 @@
 
 -- ============================================================================
 -- Section 1: Verify Microsoft Outlook is running
--- ============================================================================
--- Check that Outlook is open before attempting to read any mail data.
--- If Outlook isn't running we show a notification and exit early rather
--- than launching the app or throwing a cryptic scripting error.
 -- ============================================================================
 tell application "System Events"
 	set outlookRunning to (exists (processes where name is "Microsoft Outlook"))
@@ -26,101 +22,143 @@ if not outlookRunning then
 end if
 
 -- ============================================================================
--- Section 2: Get the currently selected email in Outlook
+-- Section 2: Resolve selected Outlook message
 -- ============================================================================
--- When invoked via Keyboard Maestro the app switch can race the
--- AppleScript engine, so we give Outlook a moment to settle.
--- We then try two methods to obtain the selected message:
---   1. "selection" – returns whatever is highlighted in the UI
---   2. "current messages" – an older/alternative property
--- If neither yields a message we notify the user and bail out.
+-- Keyboard Maestro can trigger quickly after app focus changes, so we wait
+-- briefly, then try several Outlook dictionary entry points in order:
+--   1) active explorer selection (most reliable for highlighted row)
+--   2) selected objects of front window
+--   3) selection
+--   4) current messages
+-- We keep the first object that looks like a mail message.
 -- ============================================================================
+set theMessage to missing value
+
 try
 	tell application "Microsoft Outlook"
-		-- Small delay so Outlook registers the selection after an app switch
-		delay 0.3
-
-		-- Method 1: "selection" returns a list of selected objects
-		set theMessage to missing value
-		try
-			set sel to selection
-			if sel is not {} then
-				set theMessage to item 1 of sel
-			end if
-		end try
-
-		-- Method 2: fall back to "current messages"
+		delay 0.35
+		
+		-- Method 1: highlighted messages in the message list
 		if theMessage is missing value then
 			try
-				set msgs to current messages
-				if msgs is not {} then
-					set theMessage to item 1 of msgs
-				end if
+				set candidateItems to selected objects of active explorer
+				set theMessage to my firstMailMessageFromList(candidateItems)
 			end try
 		end if
-
+		
+		-- Method 2: selected objects from the front window
 		if theMessage is missing value then
-			display notification "No email is selected in Outlook." with title "Reminder Not Created" sound name "Basso"
-			return
+			try
+				set candidateItems to selected objects of front window
+				set theMessage to my firstMailMessageFromList(candidateItems)
+			end try
 		end if
+		
+		-- Method 3: generic selection property
+		if theMessage is missing value then
+			try
+				set candidateItems to selection
+				set theMessage to my firstMailMessageFromList(candidateItems)
+			end try
+		end if
+		
+		-- Method 4: fallback for some Outlook builds
+		if theMessage is missing value then
+			try
+				set candidateItems to current messages
+				set theMessage to my firstMailMessageFromList(candidateItems)
+			end try
+		end if
+	end tell
+on error errMsg
+	display notification "Could not read Outlook selection: " & errMsg with title "Reminder Not Created" sound name "Basso"
+	return
+end try
 
-		-- ====================================================================
-		-- Section 3: Extract email properties
-		-- ====================================================================
-		-- Pull the subject line and the unique message ID from the message.
-		-- The message ID is used to construct the deep link URL.
-		-- We also grab the sender name for extra context in the reminder note.
-		-- ====================================================================
+if theMessage is missing value then
+	display notification "No email is selected in Outlook." with title "Reminder Not Created" sound name "Basso"
+	return
+end if
+
+-- ============================================================================
+-- Section 3: Extract fields needed for the reminder
+-- ============================================================================
+set theSubject to "(No Subject)"
+set theSender to "Unknown Sender"
+set internetMessageId to ""
+set numericMessageId to ""
+
+try
+	tell application "Microsoft Outlook"
 		set theSubject to subject of theMessage
-		set theMessageId to id of theMessage
+		if theSubject is missing value or theSubject is "" then set theSubject to "(No Subject)"
+		
 		try
-			set theSender to (name of sender of theMessage)
+			set theSender to name of sender of theMessage
 		on error
-			set theSender to "Unknown"
+			set theSender to "Unknown Sender"
+		end try
+		
+		-- RFC Message-ID header (preferred for message:// links)
+		try
+			set internetMessageId to message id of theMessage
+		on error
+			set internetMessageId to ""
+		end try
+		
+		-- Outlook internal item id (fallback link)
+		try
+			set numericMessageId to (id of theMessage) as text
+		on error
+			set numericMessageId to ""
 		end try
 	end tell
-
 on error errMsg
-	display notification "Could not read the selected email: " & errMsg with title "Reminder Not Created" sound name "Basso"
+	display notification "Could not read email details: " & errMsg with title "Reminder Not Created" sound name "Basso"
 	return
 end try
 
 -- ============================================================================
--- Section 4: Build the Outlook deep link URL
+-- Section 4: Build deep link URL back to the Outlook message
 -- ============================================================================
--- Microsoft Outlook on macOS supports the "message://" URL scheme, which
--- opens a specific email when clicked. The format is:
---     message://%3C<message-id>%3E
--- where %3C and %3E are URL-encoded angle brackets (< and >).
---
--- However, the id property from AppleScript is a numeric internal ID,
--- not the RFC Message-ID header. For the numeric ID, Outlook supports:
---     outlook://open?itemid=<numeric-id>
--- This scheme reliably opens the message from Reminders or any other app.
+-- Preferred format: message://%3C<internet-message-id>%3E
+-- If Outlook does not expose a message-id header, fallback to
+-- outlook://open?itemid=<internal-id>
 -- ============================================================================
-set outlookLink to "outlook://open?itemid=" & theMessageId
+set outlookLink to ""
+
+if internetMessageId is not "" then
+	set cleanMessageId to my trimText(internetMessageId)	
+	if cleanMessageId is not "" then
+		if cleanMessageId does not start with "<" then set cleanMessageId to "<" & cleanMessageId
+		if cleanMessageId does not end with ">" then set cleanMessageId to cleanMessageId & ">"
+		set encodedMessageId to my encodeMessageIdForURL(cleanMessageId)
+		set outlookLink to "message://" & encodedMessageId
+	end if
+end if
+
+if outlookLink is "" and numericMessageId is not "" then
+	set outlookLink to "outlook://open?itemid=" & numericMessageId
+end if
+
+if outlookLink is "" then
+	display notification "Could not generate an Outlook link for this email." with title "Reminder Not Created" sound name "Basso"
+	return
+end if
 
 -- ============================================================================
--- Section 5: Compose the reminder note body
--- ============================================================================
--- Include the sender and a clearly labelled link so the user can click
--- through from Reminders back to the email in Outlook.
+-- Section 5: Create reminder note content
 -- ============================================================================
 set reminderNote to "From: " & theSender & linefeed & linefeed & "Open in Outlook:" & linefeed & outlookLink
 
 -- ============================================================================
--- Section 6: Create the reminder in Apple Reminders
--- ============================================================================
--- We add the reminder to the default list. Apple's Reminders app will
--- automatically recognise the URL in the note body and make it clickable.
+-- Section 6: Create reminder in the default Reminders list
 -- ============================================================================
 try
 	tell application "Reminders"
 		set defaultList to default list
-
-		set newReminder to make new reminder in defaultList with properties {name:theSubject, body:reminderNote}
+		make new reminder in defaultList with properties {name:theSubject, body:reminderNote}
 	end tell
-
 on error errMsg
 	display notification "Could not create reminder: " & errMsg with title "Reminder Not Created" sound name "Basso"
 	return
@@ -129,7 +167,60 @@ end try
 -- ============================================================================
 -- Section 7: Success notification
 -- ============================================================================
--- Give the user clear feedback that the reminder was created, including
--- the subject line so they can confirm it's the right email.
--- ============================================================================
 display notification "\"" & theSubject & "\"" with title "Reminder Created" sound name "Glass"
+
+-- ============================================================================
+-- Helpers
+-- ============================================================================
+
+on firstMailMessageFromList(itemList)
+	if itemList is missing value then return missing value
+	if itemList is {} then return missing value
+	
+	repeat with oneItem in itemList
+		try
+			if class of oneItem is mail message then return oneItem
+		on error
+			-- Ignore non-mail objects.
+		end try
+	end repeat
+	
+	return missing value
+end firstMailMessageFromList
+
+on trimText(theText)
+	if theText is missing value then return ""
+	set t to (theText as text)
+	set ws to {space, tab, return, linefeed}
+	
+	repeat while t is not "" and (character 1 of t) is in ws
+		set t to text 2 thru -1 of t
+	end repeat
+	
+	repeat while t is not "" and (character -1 of t) is in ws
+		set t to text 1 thru -2 of t
+	end repeat
+	
+	return t
+end trimText
+
+on encodeMessageIdForURL(rawMessageId)
+	-- Minimal URL encoding sufficient for Message-ID values.
+	set outText to rawMessageId
+	set outText to my replaceText("%", "%25", outText)
+	set outText to my replaceText("<", "%3C", outText)
+	set outText to my replaceText(">", "%3E", outText)
+	set outText to my replaceText(" ", "%20", outText)
+	set outText to my replaceText("\"", "%22", outText)
+	set outText to my replaceText("#", "%23", outText)
+	return outText
+end encodeMessageIdForURL
+
+on replaceText(findText, replaceWith, sourceText)
+	set AppleScript's text item delimiters to findText
+	set textItems to every text item of sourceText
+	set AppleScript's text item delimiters to replaceWith
+	set newText to textItems as text
+	set AppleScript's text item delimiters to ""
+	return newText
+end replaceText
