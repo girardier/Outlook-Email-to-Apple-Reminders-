@@ -28,62 +28,111 @@ end if
 -- ============================================================================
 -- Section 2: Get the currently selected email in Outlook
 -- ============================================================================
--- When invoked via Keyboard Maestro the app switch can race the
--- AppleScript engine, so we give Outlook a moment to settle.
--- We then try two methods to obtain the selected message:
---   1. "selection" – returns whatever is highlighted in the UI
---   2. "current messages" – an older/alternative property
--- If neither yields a message we notify the user and bail out.
+-- Recent versions of Outlook for Mac (Classic v16.75+ and New Outlook)
+-- have a known bug where the AppleScript "selection" and "current messages"
+-- properties return empty results. We work around this by using JXA
+-- (JavaScript for Automation) where selectedObjects() still functions.
+--
+-- The script tries three methods in order:
+--   1. AppleScript "selection"
+--   2. AppleScript "current messages"
+--   3. JXA selectedObjects() via osascript (most reliable fallback)
+-- ============================================================================
+
+-- Bring Outlook to the front so the selection is registered
+tell application "Microsoft Outlook" to activate
+delay 0.5
+
+set theSubject to ""
+set theMessageId to ""
+set theSender to ""
+set gotMessage to false
+
+-- ============================================================================
+-- Method 1 & 2: Try native AppleScript properties
 -- ============================================================================
 try
 	tell application "Microsoft Outlook"
-		-- Small delay so Outlook registers the selection after an app switch
-		delay 0.3
-
-		-- Method 1: "selection" returns a list of selected objects
-		set theMessage to missing value
+		-- Try "selection" first
 		try
 			set sel to selection
-			if sel is not {} then
+			if sel is not {} and sel is not missing value then
 				set theMessage to item 1 of sel
+				set theSubject to subject of theMessage
+				set theMessageId to id of theMessage
+				try
+					set theSender to (name of sender of theMessage)
+				on error
+					set theSender to "Unknown"
+				end try
+				set gotMessage to true
 			end if
 		end try
 
-		-- Method 2: fall back to "current messages"
-		if theMessage is missing value then
+		-- Fall back to "current messages"
+		if not gotMessage then
 			try
 				set msgs to current messages
 				if msgs is not {} then
 					set theMessage to item 1 of msgs
+					set theSubject to subject of theMessage
+					set theMessageId to id of theMessage
+					try
+						set theSender to (name of sender of theMessage)
+					on error
+						set theSender to "Unknown"
+					end try
+					set gotMessage to true
 				end if
 			end try
 		end if
-
-		if theMessage is missing value then
-			display notification "No email is selected in Outlook." with title "Reminder Not Created" sound name "Basso"
-			return
-		end if
-
-		-- ====================================================================
-		-- Section 3: Extract email properties
-		-- ====================================================================
-		-- Pull the subject line and the unique message ID from the message.
-		-- The message ID is used to construct the deep link URL.
-		-- We also grab the sender name for extra context in the reminder note.
-		-- ====================================================================
-		set theSubject to subject of theMessage
-		set theMessageId to id of theMessage
-		try
-			set theSender to (name of sender of theMessage)
-		on error
-			set theSender to "Unknown"
-		end try
 	end tell
-
-on error errMsg
-	display notification "Could not read the selected email: " & errMsg with title "Reminder Not Created" sound name "Basso"
-	return
 end try
+
+-- ============================================================================
+-- Method 3: JXA fallback via osascript
+-- ============================================================================
+-- When the AppleScript dictionary is broken (common in Outlook 16.75+),
+-- JXA's selectedObjects() often still works. We shell out to osascript
+-- in JavaScript mode and parse the tab-delimited result.
+-- ============================================================================
+if not gotMessage then
+	try
+		set jxaScript to "
+var app = Application('Microsoft Outlook');
+var sel = app.selectedObjects();
+if (sel.length === 0) { 'NO_SELECTION'; }
+else {
+  var m = sel[0];
+  var subj = m.subject();
+  var mid = m.id();
+  var sender = 'Unknown';
+  try { sender = m.sender.name(); } catch(e) {}
+  subj + '\\t' + mid + '\\t' + sender;
+}
+"
+		set jxaResult to do shell script "osascript -l JavaScript -e " & quoted form of jxaScript
+
+		if jxaResult is not "NO_SELECTION" then
+			set AppleScript's text item delimiters to tab
+			set resultParts to text items of jxaResult
+			set AppleScript's text item delimiters to ""
+
+			set theSubject to item 1 of resultParts
+			set theMessageId to item 2 of resultParts
+			set theSender to item 3 of resultParts
+			set gotMessage to true
+		end if
+	end try
+end if
+
+-- ============================================================================
+-- If all methods failed, notify the user
+-- ============================================================================
+if not gotMessage then
+	display notification "No email selected, or Outlook's AppleScript support is unavailable. If you are on the New Outlook, try reverting to Classic Outlook." with title "Reminder Not Created" sound name "Basso"
+	return
+end if
 
 -- ============================================================================
 -- Section 4: Build the Outlook deep link URL
